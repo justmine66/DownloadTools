@@ -37,13 +37,13 @@ namespace DownloadTools
                     var responseMsg = await httpClient.GetAsync(downloadUri, HttpCompletionOption.ResponseHeadersRead);
                     using (var responseStream = await responseMsg.Content.ReadAsStreamAsync())
                     {
-                        int readChunkSize = 1024 * 1024;//每次下载1M
+                        int readChunkSize = 1024 * 1024;//每次下载1M(真实情况下,请根据带宽,文件大小智能计算)
                         var buffer = new byte[readChunkSize];
                         int writeChunkSize;
                         long contentSize = responseMsg.Content.Headers.ContentLength.Value;
                         var fileFullName = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, (ulong)DateTime.Now.ToBinary() + ".zip");
                         if (File.Exists(fileFullName)) File.Delete(fileFullName);
-                        int beginSecond = DateTime.Now.Second;
+                        var beginTime = DateTime.UtcNow;
                         long downloadedSize = 0;
 
                         while ((writeChunkSize = await responseStream.ReadAsync(buffer, 0, readChunkSize)) > 0)
@@ -58,21 +58,17 @@ namespace DownloadTools
 
                             this.pbDownloadNotificationInvoke(pbDownloadSpeed1, downloadSpeed);
 
-                            int endSecond = DateTime.Now.Second;
-                            if (beginSecond != endSecond)
-                            {
-                                var fileSizeUnitDesc = this.doGetFileSizeUnitDesc(writeChunkSize);
-                                string speedText = "下载速度: " + fileSizeUnitDesc.result / (endSecond - beginSecond) + fileSizeUnitDesc.unit + "/S";
-                                this.pbDownloadNotificationInvoke(lbSpreedMsg1, speedText);
-                                beginSecond = endSecond;
-                            }
+                            var endTime = DateTime.UtcNow;
+                            var fileSizeUnitDesc = this.doGetFileSizeUnitDesc((long)(downloadedSize / endTime.Subtract(beginTime).TotalSeconds));
+                            string speedText = "下载速度: " + fileSizeUnitDesc.result + fileSizeUnitDesc.unit + "/S";
+                            this.pbDownloadNotificationInvoke(lbSpreedMsg1, speedText);
 
                             if (contentSize == downloadedSize)//下载完成
                             {
                                 stopwatch.Stop();
                                 this.pbDownloadNotificationInvoke(pbDownloadSpeed1, 100);
-                                var fileSizeUnitDesc = this.doGetFileSizeUnitDesc(downloadedSize);
-                                string compMsg = "下载完成,耗时: " + stopwatch.Elapsed.Seconds + "秒,文件大小: " + fileSizeUnitDesc.result + fileSizeUnitDesc.unit;
+                                var downSizeUnitDesc = this.doGetFileSizeUnitDesc(downloadedSize);
+                                string compMsg = "下载完成,耗时: " + (int)stopwatch.Elapsed.TotalSeconds + "秒,文件大小: " + downSizeUnitDesc.result + downSizeUnitDesc.unit;
                                 this.pbDownloadNotificationInvoke(lbSpreedMsg1, compMsg);
                                 //未完善：验证文件是否与服务器一致
                             }
@@ -94,17 +90,21 @@ namespace DownloadTools
         static string preETag;
         //文件在服务器上的最后修改时间
         static DateTimeOffset? preLastModified;
+        //用时监控
+        static Stopwatch stopwatchForbpr;
+        //区间请求作为规范定义在HTTP规范中
+        //通过请求的Range报头来携带分区信息,采用的格式为:“bytes={from}-{to}”({from}和{to}分别表示区间开始和结束的位置),
+        //返回的内容=>在整个资源的位置通过响应报头Content-Range表示,采用的格式为“{from}-{to}/{length}”;分区所采用的计量单位,通过响应报头“Accept-Ranges”.
         private async void btnBreakpointResume_Click(object sender, EventArgs e)
         {
             isPause = !isPause;
             if (!isPause)
             {
                 btnBreakpointResume.Text = "暂停";
-                Stopwatch stopwatch = null;
                 if (rangeFrom == 0)
                 {
-                    stopwatch = new Stopwatch();
-                    stopwatch.Start();
+                    stopwatchForbpr = new Stopwatch();
+                    stopwatchForbpr.Start();
                 }
 
                 await Task.Run(async () =>
@@ -123,13 +123,15 @@ namespace DownloadTools
 
                         using (var responseStream = await responseMsg.Content.ReadAsStreamAsync())
                         {
-                            int readChunkSize = 1024 * 1024;//每次下载1M
+                            int readChunkSize = 1024 * 1024;//每次下载1M(真实情况下,请根据带宽,文件大小智能计算)
                             var buffer = new byte[readChunkSize];
                             int writeChunkSize;
-                            long contentSize = responseMsg.Content.Headers.ContentLength.Value;
-                            var fileFullName = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, (ulong)DateTime.Now.ToBinary() + ".zip");
-                            if (File.Exists(fileFullName)) File.Delete(fileFullName);
-                            int beginSecond = DateTime.Now.Second;
+                            //文件总大小
+                            long contentSize = responseMsg.Content.Headers.ContentRange.Length.Value;
+                            var fileFullName = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "breakpointResumeTest.zip");//文件需一致
+                            if (rangeFrom == 0 && File.Exists(fileFullName))
+                                File.Delete(fileFullName);
+                            var beginTime = DateTime.UtcNow;
 
                             while ((writeChunkSize = await responseStream.ReadAsync(buffer, 0, readChunkSize)) > 0 && !isPause)
                             {
@@ -143,22 +145,21 @@ namespace DownloadTools
                                 //进度条
                                 this.pbDownloadNotificationInvoke(pbDownloadSpeed2, downloadSpeed);
 
-                                int endSecond = DateTime.Now.Second;
-                                if (beginSecond != endSecond)
-                                {
-                                    beginSecond = endSecond;
-                                    string speedText = "下载速度: " + (rangeFrom / 1024) + " KB/S";
-                                    this.pbDownloadNotificationInvoke(lbSpreedMsg2, speedText);
-                                }
+                                var endTime = DateTime.UtcNow;
+                                string speedText = "下载速度: " + (rangeFrom / 1024) / endTime.Subtract(beginTime).TotalSeconds + " KB/S";
+                                this.pbDownloadNotificationInvoke(lbSpreedMsg2, speedText);
 
                                 if (contentSize == rangeFrom)//下载完成
                                 {
+                                    rangeFrom = 0;
+                                    isPause = true;
                                     this.pbDownloadNotificationInvoke(btnBreakpointResume, "断点续传");
                                     this.pbDownloadNotificationInvoke(pbDownloadSpeed2, 100);
-                                    if (stopwatch != null)
+                                    if (stopwatchForbpr != null)
                                     {
-                                        stopwatch.Stop();
-                                        string compMsg = "下载完成,耗时: " + stopwatch.Elapsed.Seconds + "秒,文件大小: " + rangeFrom / 1024 + " KB";
+                                        stopwatchForbpr.Stop();
+                                        var fileSizeDesc = this.doGetFileSizeUnitDesc(contentSize);
+                                        string compMsg = "下载完成,耗时: " + (int)stopwatchForbpr.Elapsed.TotalSeconds + "秒,文件大小: " + fileSizeDesc.result + fileSizeDesc.unit;
                                         this.pbDownloadNotificationInvoke(lbSpreedMsg2, compMsg);
                                     }
                                     //未完善：验证文件是否与服务器一致
@@ -173,36 +174,6 @@ namespace DownloadTools
                 btnBreakpointResume.Text = "继续下载";
                 lbSpreedMsg2.Text = string.Empty;
             }
-        }
-
-        //检查服务器是否支持断点续传
-        private bool isAcceptRange(HttpResponseMessage responseMessage)
-        {
-            //判断标准：当服务器不支持请求部分数据时，都会返回 Accept-Ranges: none。
-            if (responseMessage.Headers.AcceptRanges != null)
-            {
-                if (responseMessage.Headers.AcceptRanges.Contains("none"))
-                    return false;
-            }
-            return true;
-        }
-        //检查服务器端文件是否变化
-        private bool isServerFileChanged(HttpResponseMessage responseMessage)
-        {
-            if (preLastModified == null && string.IsNullOrEmpty(preETag))//第一次下载，文件视为未改变
-            {
-                return false;
-            }
-
-            //判断标准：ETag 和 Last-Modified都相同,则文件未改变。
-            var currETag = responseMessage.Headers.ETag.Tag;
-            DateTimeOffset? lastModified = responseMessage.Content.Headers.LastModified;
-            if (!string.IsNullOrWhiteSpace(currETag) && preETag == currETag
-                && lastModified != null && preLastModified == lastModified)
-            {
-                return false;//文件未改变，可以断点续传
-            }
-            return true;
         }
 
         #endregion
@@ -300,11 +271,11 @@ namespace DownloadTools
                         string fileFullName = Path.Combine(tempSlicesDir, sliceNo.ToString());
                         if (File.Exists(fileFullName)) File.Delete(fileFullName);
 
-                        int readChunkSize = 1024 * 1024;//每次下载1M
+                        int readChunkSize = 1024 * 1024;//每次下载1M(真实情况下,请根据带宽,文件大小智能计算)
                         var buffer = new byte[readChunkSize];
                         int writeChunkSize;
                         long sliceContentSize = responseMsg.Content.Headers.ContentLength.Value;
-                        int beginSecond = DateTime.Now.Second;
+                        var beginTime = DateTime.UtcNow;
                         long downloadedSize = 0;
 
                         while ((writeChunkSize = await responseStream.ReadAsync(buffer, 0, readChunkSize)) > 0)
@@ -321,13 +292,9 @@ namespace DownloadTools
                             var sliceSpreedMsgLb = this.GetControl(this, "lbSpreedMsg" + sliceNo);
                             this.pbDownloadNotificationInvoke(sliceDownloadSpeedPb, downloadSpeed);
 
-                            int endSecond = DateTime.Now.Second;
-                            if (beginSecond != endSecond)
-                            {
-                                beginSecond = endSecond;
-                                string speedText = "下载速度: " + (downloadedSize / 1024) + " KB/S";
-                                this.pbDownloadNotificationInvoke(sliceSpreedMsgLb, speedText);
-                            }
+                            var endTime = DateTime.UtcNow;
+                            string speedText = "下载速度: " + (downloadedSize / 1024) / endTime.Subtract(beginTime).TotalSeconds + " KB/S";
+                            this.pbDownloadNotificationInvoke(sliceSpreedMsgLb, speedText);
 
                             if (sliceContentSize == downloadedSize)//下载完成
                             {
@@ -335,7 +302,7 @@ namespace DownloadTools
                                 if (stopwatch != null)
                                 {
                                     stopwatch.Stop();
-                                    string compMsg = "下载完成,耗时: " + stopwatch.Elapsed.Seconds + "秒,文件大小: " + downloadedSize / 1024 + " KB";
+                                    string compMsg = "下载完成,耗时: " + (int)stopwatch.Elapsed.TotalSeconds + "秒,文件大小: " + downloadedSize / 1024 + " KB";
                                     this.pbDownloadNotificationInvoke(sliceSpreedMsgLb, compMsg);
                                 }
                                 //未完善：验证文件是否与服务器一致
@@ -376,9 +343,47 @@ namespace DownloadTools
 
             return task;
         }
-
         #endregion
 
+        //检查服务器是否支持断点续传
+        //思路：
+        //    区间请求作为标准定义在HTTP规范中。
+        //    响应报文头:Accept-Ranges=>标识分区所采用的计量单位(一般为“bytes”)。报头值为“none”,标识服务端不支持区间请求。
+        private bool isAcceptRange(HttpResponseMessage responseMessage)
+        {
+            //判断标准：当服务器不支持请求部分数据时，都会返回 Accept-Ranges: none。
+            if (responseMessage.Headers.AcceptRanges != null)
+            {
+                if (responseMessage.Headers.AcceptRanges.Contains("none"))
+                    return false;
+            }
+            return true;
+        }
+        //检查服务器端文件是否变化
+        //思路一：
+        //      客户端保存响应报文头(ETag和Last-Modified),每次下载时,判断文件是否改变.
+        //思路二：
+        //      条件请求作为标准定义在HTTP规范中
+        //      客户端保存响应报文头(ETag和Last-Modified),每次请求时,将Last-Modified作为请求头If-Modified-Since的值,
+        //同理,Last-Modified作为请求头If-None-Match的值,对服务器进行条件请求.
+        //说明：本次示例,采用思路一.
+        private bool isServerFileChanged(HttpResponseMessage responseMessage)
+        {
+            if (preLastModified == null && string.IsNullOrEmpty(preETag))//第一次下载.
+            {
+                return false;
+            }
+
+            //判断标准：ETag 和 Last-Modified都相同,则文件未改变。
+            var currETag = responseMessage.Headers.ETag.Tag;
+            DateTimeOffset? lastModified = responseMessage.Content.Headers.LastModified;
+            if (!string.IsNullOrWhiteSpace(currETag) && preETag == currETag
+                && lastModified != null && preLastModified == lastModified)
+            {
+                return false;//文件未改变，可以断点续传
+            }
+            return true;
+        }
         private void pbDownloadNotificationInvoke(Control control, object value)
         {
             control.Invoke((Action)(() =>
@@ -398,7 +403,6 @@ namespace DownloadTools
                 }
             }));
         }
-
         private Control GetControl(Form container, string controlName)
         {
             for (int i = 0; i < container.Controls.Count; i++)
